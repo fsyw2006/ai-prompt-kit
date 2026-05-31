@@ -184,8 +184,8 @@ def parse_markdown_prompts(markdown_content: str) -> list[dict]:
 
 
 class PromptStore:
-    def __init__(self, path: Path = DEFAULT_DATA_FILE) -> None:
-        self.path = path
+    def __init__(self, path: Path | str = DEFAULT_DATA_FILE) -> None:
+        self.path = Path(path) if isinstance(path, str) else path
 
     def load(self) -> list[Prompt]:
         if not self.path.exists():

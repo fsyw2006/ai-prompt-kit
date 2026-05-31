@@ -351,15 +351,19 @@ def truncate(value: str, length: int) -> str:
     return value[: length - 3] + "..."
 
 
-def print_prompt_usage_table(prompts: list[Prompt], title: str) -> None:
+def print_prompt_usage_table(prompts: list[Prompt], header: str) -> None:
     """Print a table of prompts with usage information."""
-    print(title)
+    if header:
+        print(header)
+    if not prompts:
+        print("No prompts found.")
+        return
     print(f"{'ID':<4} {'Title':<32} {'Used':<8} {'Last Used':<20}")
     print("-" * 64)
     for prompt in prompts:
-        title = truncate(prompt.title, 30)
+        prompt_title = truncate(prompt.title, 30)
         last_used = prompt.last_used_at[:19] if prompt.last_used_at else "Never"
-        print(f"{prompt.id:<4} {title:<32} {prompt.usage_count:<8} {last_used:<20}")
+        print(f"{prompt.id:<4} {prompt_title:<32} {prompt.usage_count:<8} {last_used:<20}")
 
 
 if __name__ == "__main__":
