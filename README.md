@@ -1,19 +1,22 @@
 # AI Prompt Kit
 
+[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A small command-line toolkit for saving, tagging, searching, and reusing AI prompts.
 
 AI Prompt Kit is designed for people who use ChatGPT, Codex, Claude, Gemini, or other AI tools every day and want a simple local prompt library that stays under their control.
 
-## Features
+## ✨ Features
 
-- Save prompts with a title, tags, and notes
-- List all saved prompts
-- Search prompts by keyword or tag
-- Copy a prompt into your clipboard
-- Export your prompt library as Markdown
-- Store everything locally in a readable JSON file
+- **Save prompts** with a title, tags, and notes
+- **List all** saved prompts
+- **Search prompts** by keyword or tag
+- **Copy a prompt** into your clipboard
+- **Export** your prompt library as Markdown
+- **Store everything locally** in a readable JSON file
 
-## Installation
+## 📦 Installation
 
 This project uses only the Python standard library.
 
@@ -28,7 +31,7 @@ python -m pip install -e .
 ai-prompt-kit --help
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
 Add a prompt:
 
@@ -67,7 +70,7 @@ Export to Markdown:
 python -m aipromptkit export prompts.md
 ```
 
-## Data Location
+## 📁 Data Location
 
 By default, prompts are stored in:
 
@@ -81,18 +84,22 @@ You can use a custom file:
 python -m aipromptkit --data ./prompts.json list
 ```
 
-## Roadmap
+## 🗺️ Roadmap
 
-- Prompt variables such as `{{topic}}` and `{{tone}}`
-- Import from Markdown
-- Prompt collections
-- Basic quality checks for unclear prompts
-- Optional sync support
+- [ ] Prompt variables such as `{{topic}}` and `{{tone}}`
+- [ ] Import from Markdown
+- [ ] Prompt collections
+- [ ] Basic quality checks for unclear prompts
+- [ ] Optional sync support
 
-## Contributing
+## 🤝 Contributing
 
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-## License
+## 📄 License
 
-MIT License. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+**Made with ❤️ by AI Prompt Kit contributors**
