@@ -28,7 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--tags", default="", help="Comma-separated tags.")
     add_parser.add_argument("--notes", default="", help="Optional notes.")
 
-    subparsers.add_parser("list", help="List saved prompts.")
+    list_parser = subparsers.add_parser("list", help="List saved prompts.")
+    list_parser.add_argument(
+        "--starred",
+        action="store_true",
+        help="Show only starred prompts.",
+    )
 
     show_parser = subparsers.add_parser("show", help="Show a prompt by id.")
     show_parser.add_argument("id", type=int, help="Prompt id.")
@@ -36,12 +41,23 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser = subparsers.add_parser("search", help="Search prompts.")
     search_parser.add_argument("query", nargs="?", default="", help="Keyword to search.")
     search_parser.add_argument("--tag", default="", help="Filter by tag.")
+    search_parser.add_argument(
+        "--fuzzy",
+        action="store_true",
+        help="Enable fuzzy matching (tolerates typos).",
+    )
 
     copy_parser = subparsers.add_parser("copy", help="Copy prompt body by id.")
     copy_parser.add_argument("id", type=int, help="Prompt id.")
 
-    export_parser = subparsers.add_parser("export", help="Export prompts to Markdown.")
-    export_parser.add_argument("output", help="Output Markdown file.")
+    export_parser = subparsers.add_parser("export", help="Export prompts to file.")
+    export_parser.add_argument("output", help="Output file path.")
+    export_parser.add_argument(
+        "--format",
+        choices=["markdown", "json", "csv"],
+        default="markdown",
+        help="Export format (default: markdown).",
+    )
 
     use_parser = subparsers.add_parser("use", help="Use a prompt with variable substitution.")
     use_parser.add_argument("id", type=int, help="Prompt id.")
@@ -99,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of prompts to show (default: 10).",
     )
 
+    # Star commands
+    star_parser = subparsers.add_parser("star", help="Star/unstar a prompt.")
+    star_subparsers = star_parser.add_subparsers(dest="star_command", required=True)
+    star_add_parser = star_subparsers.add_parser("add", help="Star a prompt.")
+    star_add_parser.add_argument("id", type=int, help="Prompt id.")
+    star_remove_parser = star_subparsers.add_parser("remove", help="Unstar a prompt.")
+    star_remove_parser.add_argument("id", type=int, help="Prompt id.")
+    star_list_parser = star_subparsers.add_parser("list", help="List starred prompts.")
+
     return parser
 
 
@@ -114,7 +139,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "list":
-            print_prompt_table(store.load())
+            if args.starred:
+                print_prompt_table(store.get_starred())
+            else:
+                print_prompt_table(store.load())
             return 0
 
         if args.command == "show":
@@ -122,7 +150,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "search":
-            print_prompt_table(store.search(args.query, args.tag))
+            if args.fuzzy:
+                print_prompt_table(store.fuzzy_search(args.query, args.tag))
+            else:
+                print_prompt_table(store.search(args.query, args.tag))
             return 0
 
         if args.command == "copy":
@@ -132,8 +163,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "export":
-            export_markdown(store.load(), Path(args.output))
-            print(f"Exported prompts to {args.output}")
+            output_path = Path(args.output)
+            if args.format == "json":
+                store.export_json(output_path)
+            elif args.format == "csv":
+                store.export_csv(output_path)
+            else:
+                export_markdown(store.load(), output_path)
+            print(f"Exported prompts to {args.output} ({args.format} format)")
             return 0
 
         if args.command == "use":
@@ -245,6 +282,36 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Error: {e}", file=sys.stderr)
                     return 1
 
+        if args.command == "star":
+            if args.star_command == "add":
+                try:
+                    store.star(args.id)
+                    prompt = store.get(args.id)
+                    print(f"Starred prompt #{prompt.id}: {prompt.title}")
+                    return 0
+                except LookupError as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    return 1
+            
+            if args.star_command == "remove":
+                try:
+                    store.unstar(args.id)
+                    prompt = store.get(args.id)
+                    print(f"Unstarred prompt #{prompt.id}: {prompt.title}")
+                    return 0
+                except LookupError as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    return 1
+            
+            if args.star_command == "list":
+                starred = store.get_starred()
+                if not starred:
+                    print("No starred prompts.")
+                    return 0
+                print("Starred prompts:")
+                print_prompt_table(starred)
+                return 0
+
         if args.command == "stats":
             if args.most_used:
                 print_prompt_usage_table(store.get_most_used(args.limit), f"Most used prompts (top {args.limit}):")
@@ -282,12 +349,13 @@ def print_prompt_table(prompts: list[Prompt]) -> None:
         print("No prompts found.")
         return
 
-    print(f"{'ID':<4} {'Title':<32} Tags")
+    print(f"{'ID':<4} {'*':<2} {'Title':<30} Tags")
     print("-" * 70)
     for prompt in prompts:
-        title = truncate(prompt.title, 30)
+        title = truncate(prompt.title, 28)
         tags = ", ".join(prompt.tags) if prompt.tags else "-"
-        print(f"{prompt.id:<4} {title:<32} {tags}")
+        star = "*" if prompt.starred else " "
+        print(f"{prompt.id:<4} {star:<2} {title:<30} {tags}")
 
 
 def print_prompt_detail(prompt: Prompt) -> None:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +25,7 @@ class Prompt:
     updated_at: str = ""
     usage_count: int = 0
     last_used_at: str | None = None
+    starred: bool = False
 
     @classmethod
     def create(cls, prompt_id: int, title: str, body: str, tags: Iterable[str], notes: str) -> "Prompt":
@@ -49,6 +52,7 @@ class Prompt:
             updated_at=str(data.get("updated_at", "")),
             usage_count=int(data.get("usage_count", 0)),
             last_used_at=data.get("last_used_at"),
+            starred=bool(data.get("starred", False)),
         )
 
     def to_dict(self) -> dict:
@@ -62,6 +66,7 @@ class Prompt:
             "updated_at": self.updated_at,
             "usage_count": self.usage_count,
             "last_used_at": self.last_used_at,
+            "starred": self.starred,
         }
 
 
@@ -86,6 +91,17 @@ def normalize_tags(tags: Iterable[str] | str | None) -> list[str]:
 # Variable pattern: {{variable_name}} or {{variable_name:default_value}}
 VARIABLE_PATTERN = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
 
+# Built-in variables that are automatically available
+BUILTIN_VARIABLES = {
+    "today": lambda: datetime.now().strftime("%Y-%m-%d"),
+    "now": lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    "year": lambda: datetime.now().strftime("%Y"),
+    "month": lambda: datetime.now().strftime("%m"),
+    "day": lambda: datetime.now().strftime("%d"),
+    "time": lambda: datetime.now().strftime("%H:%M:%S"),
+    "timestamp": lambda: str(int(datetime.now().timestamp())),
+}
+
 
 def extract_variables(text: str) -> list[str]:
     """Extract variable names from text."""
@@ -93,11 +109,32 @@ def extract_variables(text: str) -> list[str]:
 
 
 def replace_variables(text: str, variables: dict[str, str]) -> str:
-    """Replace variables in text with provided values."""
+    """Replace variables in text with provided values.
+    
+    Supports built-in variables: {{today}}, {{now}}, {{year}}, {{month}}, {{day}}, {{time}}, {{timestamp}}
+    Supports custom date format: {{date:YYYY-MM-DD}}
+    """
     def replacer(match: re.Match) -> str:
         var_name = match.group(1)
         default_value = match.group(2) if match.group(2) is not None else ""
-        return variables.get(var_name, default_value)
+        
+        # Check if user provided a value
+        if var_name in variables:
+            return variables[var_name]
+        
+        # Check for built-in variables
+        if var_name in BUILTIN_VARIABLES:
+            return BUILTIN_VARIABLES[var_name]()
+        
+        # Check for date format variable ({{date:format}})
+        if var_name == "date" and default_value:
+            try:
+                return datetime.now().strftime(default_value)
+            except ValueError:
+                return default_value
+        
+        # Return default value or empty string
+        return default_value
     
     return VARIABLE_PATTERN.sub(replacer, text)
 
@@ -308,6 +345,105 @@ class PromptStore:
     def get_prompts_by_tag(self, tag: str) -> list[Prompt]:
         """Get all prompts with a specific tag."""
         return self.search(tag=tag)
+
+    def star(self, prompt_id: int) -> None:
+        """Mark a prompt as starred."""
+        prompts = self.load()
+        for prompt in prompts:
+            if prompt.id == prompt_id:
+                prompt.starred = True
+                prompt.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                self.save(prompts)
+                return
+        raise LookupError(f"No prompt found with id {prompt_id}.")
+
+    def unstar(self, prompt_id: int) -> None:
+        """Remove star from a prompt."""
+        prompts = self.load()
+        for prompt in prompts:
+            if prompt.id == prompt_id:
+                prompt.starred = False
+                prompt.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                self.save(prompts)
+                return
+        raise LookupError(f"No prompt found with id {prompt_id}.")
+
+    def get_starred(self) -> list[Prompt]:
+        """Get all starred prompts."""
+        prompts = self.load()
+        return [p for p in prompts if p.starred]
+
+    def fuzzy_search(self, query: str, tag: str = "") -> list[Prompt]:
+        """Fuzzy search prompts - matches partial words with typos."""
+        query = query.strip().lower()
+        tag = tag.strip().lower()
+        
+        if not query:
+            return self.search(query="", tag=tag)
+        
+        results = []
+        for prompt in self.load():
+            # Check tag filter first
+            if tag and tag not in prompt.tags:
+                continue
+            
+            # Build searchable text
+            text = " ".join([prompt.title, prompt.body, prompt.notes, " ".join(prompt.tags)]).lower()
+            
+            # Fuzzy matching: check if query words match with some tolerance
+            query_words = query.split()
+            matches = 0
+            for qword in query_words:
+                # Exact match
+                if qword in text:
+                    matches += 1
+                    continue
+                # Partial match (prefix/suffix)
+                for tw in text.split():
+                    if qword in tw or tw in qword:
+                        matches += 1
+                        break
+                # Levenshtein-like: check if at least 70% of chars match
+                else:
+                    for tw in text.split():
+                        if len(tw) >= 3 and len(qword) >= 3:
+                            common = sum(1 for a, b in zip(qword, tw) if a == b)
+                            similarity = common / max(len(qword), len(tw))
+                            if similarity >= 0.7:
+                                matches += 1
+                                break
+            
+            if matches == len(query_words):
+                results.append(prompt)
+        
+        return results
+
+    def export_json(self, output: Path | str) -> None:
+        """Export prompts to JSON file."""
+        output = Path(output) if isinstance(output, str) else output
+        prompts = self.load()
+        data = {"prompts": [p.to_dict() for p in prompts]}
+        output.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def export_csv(self, output: Path | str) -> None:
+        """Export prompts to CSV file."""
+        output = Path(output) if isinstance(output, str) else output
+        prompts = self.load()
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["id", "title", "body", "tags", "notes", "starred", "usage_count", "created_at"])
+        for p in prompts:
+            writer.writerow([
+                p.id,
+                p.title,
+                p.body,
+                "|".join(p.tags),
+                p.notes,
+                p.starred,
+                p.usage_count,
+                p.created_at,
+            ])
+        output.write_text(buffer.getvalue(), encoding="utf-8")
 
     def import_from_markdown(self, markdown_path: Path, overwrite: bool = False) -> list[Prompt]:
         """Import prompts from a markdown file."""
