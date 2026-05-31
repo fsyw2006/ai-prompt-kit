@@ -15,6 +15,11 @@ AI Prompt Kit is designed for people who use ChatGPT, Codex, Claude, Gemini, or 
 - **Copy a prompt** into your clipboard
 - **Export** your prompt library as Markdown
 - **Store everything locally** in a readable JSON file
+- **Prompt variables** with `{{variable}}` syntax
+- **Import from Markdown** for batch importing
+- **Backup and restore** functionality
+- **Usage statistics** to track prompt usage
+- **Tag management** to add and remove tags
 
 ## 📦 Installation
 
@@ -70,6 +75,42 @@ Export to Markdown:
 python -m aipromptkit export prompts.md
 ```
 
+Use a prompt with variables:
+
+```bash
+python -m aipromptkit use 1 --vars topic=Python,language=English
+```
+
+Import from Markdown:
+
+```bash
+python -m aipromptkit import prompts.md --overwrite
+```
+
+Backup and restore:
+
+```bash
+python -m aipromptkit backup create
+python -m aipromptkit backup list
+python -m aipromptkit backup restore prompts_2025-05-31_10-30-45_123.json
+```
+
+View usage statistics:
+
+```bash
+python -m aipromptkit stats
+python -m aipromptkit stats --most-used
+python -m aipromptkit stats --recently-used
+```
+
+Manage tags:
+
+```bash
+python -m aipromptkit tag list
+python -m aipromptkit tag add 1 newtag
+python -m aipromptkit tag remove 1 oldtag
+```
+
 ## 📁 Data Location
 
 By default, prompts are stored in:
@@ -86,8 +127,11 @@ python -m aipromptkit --data ./prompts.json list
 
 ## 🗺️ Roadmap
 
-- [ ] Prompt variables such as `{{topic}}` and `{{tone}}`
-- [ ] Import from Markdown
+- [x] Prompt variables such as `{{topic}}` and `{{tone}}`
+- [x] Import from Markdown
+- [x] Backup and restore
+- [x] Usage statistics
+- [x] Tag management
 - [ ] Prompt collections
 - [ ] Basic quality checks for unclear prompts
 - [ ] Optional sync support

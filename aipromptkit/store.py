@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,8 @@ class Prompt:
     notes: str = ""
     created_at: str = ""
     updated_at: str = ""
+    usage_count: int = 0
+    last_used_at: str | None = None
 
     @classmethod
     def create(cls, prompt_id: int, title: str, body: str, tags: Iterable[str], notes: str) -> "Prompt":
@@ -43,6 +47,8 @@ class Prompt:
             notes=str(data.get("notes", "")),
             created_at=str(data.get("created_at", "")),
             updated_at=str(data.get("updated_at", "")),
+            usage_count=int(data.get("usage_count", 0)),
+            last_used_at=data.get("last_used_at"),
         )
 
     def to_dict(self) -> dict:
@@ -54,10 +60,14 @@ class Prompt:
             "notes": self.notes,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "usage_count": self.usage_count,
+            "last_used_at": self.last_used_at,
         }
 
 
-def normalize_tags(tags: Iterable[str] | str) -> list[str]:
+def normalize_tags(tags: Iterable[str] | str | None) -> list[str]:
+    if tags is None:
+        return []
     if isinstance(tags, str):
         raw_tags = tags.split(",")
     else:
@@ -71,6 +81,106 @@ def normalize_tags(tags: Iterable[str] | str) -> list[str]:
             normalized.append(value)
             seen.add(value)
     return normalized
+
+
+# Variable pattern: {{variable_name}} or {{variable_name:default_value}}
+VARIABLE_PATTERN = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
+
+
+def extract_variables(text: str) -> list[str]:
+    """Extract variable names from text."""
+    return VARIABLE_PATTERN.findall(text)
+
+
+def replace_variables(text: str, variables: dict[str, str]) -> str:
+    """Replace variables in text with provided values."""
+    def replacer(match: re.Match) -> str:
+        var_name = match.group(1)
+        default_value = match.group(2) if match.group(2) is not None else ""
+        return variables.get(var_name, default_value)
+    
+    return VARIABLE_PATTERN.sub(replacer, text)
+
+
+def parse_markdown_prompts(markdown_content: str) -> list[dict]:
+    """Parse markdown content into prompts.
+    
+    Expected format:
+    # Prompt Title
+    Tags: tag1, tag2
+    
+    ## Body
+    Prompt body text
+    
+    ## Notes
+    Optional notes
+    """
+    prompts = []
+    lines = markdown_content.split("\n")
+    
+    current_prompt = {}
+    current_section = None
+    current_content = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Check for new prompt (starts with # but not ##)
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            # Save previous prompt if exists
+            if current_prompt:
+                # Save current section content
+                if current_section == "body" and current_content:
+                    current_prompt["body"] = "\n".join(current_content).strip()
+                elif current_section == "notes" and current_content:
+                    current_prompt["notes"] = "\n".join(current_content).strip()
+                prompts.append(current_prompt)
+                current_prompt = {}
+                current_content = []
+            
+            # Start new prompt
+            title = stripped[2:].strip()
+            # Remove any leading numbers like "1. " or "1. "
+            title = re.sub(r"^\d+\.\s*", "", title)
+            current_prompt["title"] = title
+            current_section = None
+            
+        elif stripped.startswith("## "):
+            # Save content of previous section
+            if current_section == "body" and current_content:
+                current_prompt["body"] = "\n".join(current_content).strip()
+            elif current_section == "notes" and current_content:
+                current_prompt["notes"] = "\n".join(current_content).strip()
+            
+            # Start new section
+            section_name = stripped[3:].strip().lower()
+            if section_name in ["body", "正文"]:
+                current_section = "body"
+            elif section_name in ["notes", "笔记"]:
+                current_section = "notes"
+            else:
+                current_section = None
+            current_content = []
+            
+        elif stripped.startswith("Tags:") or stripped.startswith("标签:"):
+            # Parse tags line
+            tags_str = stripped.split(":", 1)[1].strip()
+            current_prompt["tags"] = normalize_tags(tags_str)
+            
+        elif current_section and stripped:
+            # Add content to current section
+            current_content.append(line)
+    
+    # Save last prompt
+    if current_prompt:
+        # Save current section content
+        if current_section == "body" and current_content:
+            current_prompt["body"] = "\n".join(current_content).strip()
+        elif current_section == "notes" and current_content:
+            current_prompt["notes"] = "\n".join(current_content).strip()
+        prompts.append(current_prompt)
+    
+    return prompts
 
 
 class PromptStore:
@@ -126,3 +236,183 @@ class PromptStore:
                 results.append(prompt)
 
         return results
+
+    def record_usage(self, prompt_id: int) -> None:
+        """Record that a prompt was used."""
+        prompts = self.load()
+        for prompt in prompts:
+            if prompt.id == prompt_id:
+                prompt.usage_count += 1
+                prompt.last_used_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                self.save(prompts)
+                return
+        raise LookupError(f"No prompt found with id {prompt_id}.")
+
+    def get_most_used(self, limit: int = 10) -> list[Prompt]:
+        """Get the most used prompts."""
+        prompts = self.load()
+        return sorted(prompts, key=lambda p: p.usage_count, reverse=True)[:limit]
+
+    def get_recently_used(self, limit: int = 10) -> list[Prompt]:
+        """Get the most recently used prompts."""
+        prompts = self.load()
+        # Filter prompts that have been used at least once
+        used_prompts = [p for p in prompts if p.last_used_at]
+        return sorted(used_prompts, key=lambda p: p.last_used_at or "", reverse=True)[:limit]
+
+    def get_stats(self) -> dict:
+        """Get overall usage statistics."""
+        prompts = self.load()
+        total_usage = sum(p.usage_count for p in prompts)
+        used_count = sum(1 for p in prompts if p.usage_count > 0)
+        return {
+            "total_prompts": len(prompts),
+            "used_prompts": used_count,
+            "unused_prompts": len(prompts) - used_count,
+            "total_usage": total_usage,
+            "average_usage": total_usage / len(prompts) if prompts else 0,
+        }
+
+    def add_tag(self, prompt_id: int, tag: str) -> None:
+        """Add a tag to a prompt."""
+        prompts = self.load()
+        for prompt in prompts:
+            if prompt.id == prompt_id:
+                normalized_tag = tag.strip().lower()
+                if normalized_tag not in prompt.tags:
+                    prompt.tags.append(normalized_tag)
+                    self.save(prompts)
+                return
+        raise LookupError(f"No prompt found with id {prompt_id}.")
+
+    def remove_tag(self, prompt_id: int, tag: str) -> None:
+        """Remove a tag from a prompt."""
+        prompts = self.load()
+        for prompt in prompts:
+            if prompt.id == prompt_id:
+                normalized_tag = tag.strip().lower()
+                if normalized_tag in prompt.tags:
+                    prompt.tags.remove(normalized_tag)
+                    self.save(prompts)
+                return
+        raise LookupError(f"No prompt found with id {prompt_id}.")
+
+    def get_all_tags(self) -> list[str]:
+        """Get all unique tags."""
+        prompts = self.load()
+        tags = set()
+        for prompt in prompts:
+            tags.update(prompt.tags)
+        return sorted(list(tags))
+
+    def get_prompts_by_tag(self, tag: str) -> list[Prompt]:
+        """Get all prompts with a specific tag."""
+        return self.search(tag=tag)
+
+    def import_from_markdown(self, markdown_path: Path, overwrite: bool = False) -> list[Prompt]:
+        """Import prompts from a markdown file."""
+        if not markdown_path.exists():
+            raise FileNotFoundError(f"Markdown file not found: {markdown_path}")
+        
+        content = markdown_path.read_text(encoding="utf-8")
+        prompt_dicts = parse_markdown_prompts(content)
+        
+        imported_prompts = []
+        existing_prompts = self.load()
+        existing_titles = {prompt.title.lower() for prompt in existing_prompts}
+        
+        next_id = max((prompt.id for prompt in existing_prompts), default=0) + 1
+        
+        for prompt_dict in prompt_dicts:
+            title = prompt_dict.get("title", "").strip()
+            body = prompt_dict.get("body", "").strip()
+            tags = prompt_dict.get("tags", [])
+            notes = prompt_dict.get("notes", "").strip()
+            
+            if not title or not body:
+                continue  # Skip prompts without title or body
+            
+            # Check for duplicates
+            if title.lower() in existing_titles:
+                if overwrite:
+                    # Find and remove existing prompt
+                    existing_prompts = [p for p in existing_prompts if p.title.lower() != title.lower()]
+                    existing_titles.remove(title.lower())
+                else:
+                    continue  # Skip duplicate
+            
+            # Create new prompt
+            prompt = Prompt.create(next_id, title, body, tags, notes)
+            imported_prompts.append(prompt)
+            existing_prompts.append(prompt)
+            existing_titles.add(title.lower())
+            next_id += 1
+        
+        # Save all prompts
+        self.save(existing_prompts)
+        return imported_prompts
+
+    def create_backup(self) -> Path:
+        """Create a backup of the current prompts file."""
+        if not self.path.exists():
+            raise FileNotFoundError(f"Data file not found: {self.path}")
+        
+        # Create backups directory
+        backups_dir = self.path.parent / "backups"
+        backups_dir.mkdir(exist_ok=True)
+        
+        # Create backup filename with timestamp (including milliseconds for uniqueness)
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%d_%H-%M-%S") + f"_{now.microsecond // 1000:03d}"
+        backup_filename = f"prompts_{timestamp}.json"
+        backup_path = backups_dir / backup_filename
+        
+        # Copy the file
+        shutil.copy2(self.path, backup_path)
+        
+        # Clean up old backups (keep only last 7)
+        self._cleanup_backups(backups_dir)
+        
+        return backup_path
+    
+    def _cleanup_backups(self, backups_dir: Path, keep: int = 7) -> None:
+        """Remove old backups, keeping only the most recent ones."""
+        backup_files = sorted(backups_dir.glob("prompts_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        for backup_file in backup_files[keep:]:
+            backup_file.unlink()
+    
+    def list_backups(self) -> list[dict]:
+        """List all available backups."""
+        backups_dir = self.path.parent / "backups"
+        if not backups_dir.exists():
+            return []
+        
+        backups = []
+        for backup_file in sorted(backups_dir.glob("prompts_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = backup_file.stat()
+            backups.append({
+                "name": backup_file.name,
+                "path": backup_file,
+                "size": stat.st_size,
+                "created": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            })
+        
+        return backups
+    
+    def restore_backup(self, backup_name: str) -> None:
+        """Restore from a backup file."""
+        backups_dir = self.path.parent / "backups"
+        backup_path = backups_dir / backup_name
+        
+        if not backup_path.exists():
+            raise FileNotFoundError(f"Backup not found: {backup_name}")
+        
+        # Create a backup of current state before restoring
+        if self.path.exists():
+            # Create backup in a temporary location to avoid cleanup issues
+            temp_backup = backups_dir / f"pre_restore_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+            shutil.copy2(self.path, temp_backup)
+        
+        # Restore the backup
+        shutil.copy2(backup_path, self.path)
