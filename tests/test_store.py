@@ -2,7 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aipromptkit.store import PromptStore, normalize_tags, extract_variables, replace_variables, parse_markdown_prompts
+from aipromptkit.store import (
+    PromptStore,
+    extract_variables,
+    find_missing_variables,
+    normalize_tags,
+    parse_markdown_prompts,
+    replace_variables,
+)
 
 
 class PromptStoreTests(unittest.TestCase):
@@ -45,6 +52,7 @@ class PromptStoreTests(unittest.TestCase):
         self.assertEqual(replace_variables("No variables", {}), "No variables")
         self.assertEqual(replace_variables("{{topic}}", {"topic": "AI"}), "AI")
         self.assertEqual(replace_variables("{{topic:default}}", {}), "default")
+        self.assertEqual(replace_variables("{{topic}}", {}), "{{topic}}")
         self.assertEqual(
             replace_variables("Write about {{topic}} in {{language:English}}", {"topic": "AI"}),
             "Write about AI in English",
@@ -53,6 +61,12 @@ class PromptStoreTests(unittest.TestCase):
             replace_variables("Write about {{topic}} in {{language:English}}", {"topic": "AI", "language": "Chinese"}),
             "Write about AI in Chinese",
         )
+
+    def test_find_missing_variables(self):
+        self.assertEqual(find_missing_variables("{{topic}}", {}), ["topic"])
+        self.assertEqual(find_missing_variables("{{topic}}", {"topic": "AI"}), [])
+        self.assertEqual(find_missing_variables("{{topic:AI}}", {}), [])
+        self.assertEqual(find_missing_variables("{{today}}", {}), [])
 
     def test_parse_markdown_prompts(self):
         markdown_content = """# Test Prompt
@@ -83,6 +97,29 @@ Another body."""
         self.assertEqual(prompts[1]["body"], "Another body.")
         self.assertNotIn("notes", prompts[1])
 
+    def test_parse_exported_markdown_prompt(self):
+        markdown_content = """# Prompt Library
+
+## 1. Exported Prompt
+
+Tags: coding, review
+
+```text
+Review this code.
+```
+
+Notes:
+Useful for PRs
+"""
+
+        prompts = parse_markdown_prompts(markdown_content)
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0]["title"], "Exported Prompt")
+        self.assertEqual(prompts[0]["tags"], ["coding", "review"])
+        self.assertEqual(prompts[0]["body"], "Review this code.")
+        self.assertEqual(prompts[0]["notes"], "Useful for PRs")
+
     def test_backup_restore(self):
         with tempfile.TemporaryDirectory() as directory:
             store = PromptStore(Path(directory) / "prompts.json")
@@ -103,6 +140,15 @@ Another body."""
             prompts_after = store.load()
             self.assertEqual(len(prompts_after), 1)
             self.assertEqual(prompts_after[0].title, "Prompt 1")
+
+    def test_create_backup_without_existing_data_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PromptStore(Path(directory) / "prompts.json")
+
+            backup_path = store.create_backup()
+
+            self.assertTrue(backup_path.exists())
+            self.assertEqual(store.load(), [])
 
     def test_list_backups(self):
         import time
