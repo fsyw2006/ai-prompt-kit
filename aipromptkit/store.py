@@ -103,9 +103,26 @@ BUILTIN_VARIABLES = {
 }
 
 
-def extract_variables(text: str) -> list[str]:
+def extract_variables(text: str) -> list[tuple[str, str]]:
     """Extract variable names from text."""
     return VARIABLE_PATTERN.findall(text)
+
+
+def find_missing_variables(text: str, variables: dict[str, str]) -> list[str]:
+    """Return variables that need user-provided values."""
+    missing = []
+    seen = set()
+    for name, default in extract_variables(text):
+        if name in variables or name in BUILTIN_VARIABLES:
+            continue
+        if name == "date" and default:
+            continue
+        if default:
+            continue
+        if name not in seen:
+            missing.append(name)
+            seen.add(name)
+    return missing
 
 
 def replace_variables(text: str, variables: dict[str, str]) -> str:
@@ -133,8 +150,10 @@ def replace_variables(text: str, variables: dict[str, str]) -> str:
             except ValueError:
                 return default_value
         
-        # Return default value or empty string
-        return default_value
+        # Leave unresolved required variables visible for callers to handle.
+        if default_value:
+            return default_value
+        return match.group(0)
     
     return VARIABLE_PATTERN.sub(replacer, text)
 
@@ -142,14 +161,25 @@ def replace_variables(text: str, variables: dict[str, str]) -> str:
 def parse_markdown_prompts(markdown_content: str) -> list[dict]:
     """Parse markdown content into prompts.
     
-    Expected format:
+    Supported input format:
     # Prompt Title
     Tags: tag1, tag2
-    
+
     ## Body
     Prompt body text
     
     ## Notes
+    Optional notes
+
+    Also supports the Markdown produced by ``ai-prompt-kit export``:
+    ## 1. Prompt Title
+    Tags: tag1, tag2
+
+    ```text
+    Prompt body text
+    ```
+
+    Notes:
     Optional notes
     """
     prompts = []
@@ -158,12 +188,32 @@ def parse_markdown_prompts(markdown_content: str) -> list[dict]:
     current_prompt = {}
     current_section = None
     current_content = []
+    in_code_block = False
+    pending_notes = False
     
     for line in lines:
         stripped = line.strip()
         
-        # Check for new prompt (starts with # but not ##)
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            if in_code_block and current_prompt and current_section is None:
+                current_section = "body"
+                current_content = []
+            continue
+
+        # Check for new prompt.
+        is_new_prompt = False
+        title = ""
         if stripped.startswith("# ") and not stripped.startswith("## "):
+            title = stripped[2:].strip()
+            is_new_prompt = title.lower() != "prompt library"
+        elif stripped.startswith("## ") and not in_code_block:
+            heading = stripped[3:].strip()
+            if heading.lower() not in {"body", "正文", "notes", "笔记"}:
+                title = heading
+                is_new_prompt = True
+
+        if is_new_prompt:
             # Save previous prompt if exists
             if current_prompt:
                 # Save current section content
@@ -174,14 +224,14 @@ def parse_markdown_prompts(markdown_content: str) -> list[dict]:
                 prompts.append(current_prompt)
                 current_prompt = {}
                 current_content = []
-            
+
             # Start new prompt
-            title = stripped[2:].strip()
             # Remove any leading numbers like "1. " or "1. "
             title = re.sub(r"^\d+\.\s*", "", title)
             current_prompt["title"] = title
             current_section = None
-            
+            pending_notes = False
+
         elif stripped.startswith("## "):
             # Save content of previous section
             if current_section == "body" and current_content:
@@ -198,15 +248,25 @@ def parse_markdown_prompts(markdown_content: str) -> list[dict]:
             else:
                 current_section = None
             current_content = []
-            
+            pending_notes = False
+
         elif stripped.startswith("Tags:") or stripped.startswith("标签:"):
             # Parse tags line
             tags_str = stripped.split(":", 1)[1].strip()
             current_prompt["tags"] = normalize_tags(tags_str)
+
+        elif stripped == "Notes:" or stripped == "笔记:":
+            if current_section == "body" and current_content:
+                current_prompt["body"] = "\n".join(current_content).strip()
+            current_section = "notes"
+            current_content = []
+            pending_notes = True
             
-        elif current_section and stripped:
+        elif current_section and (stripped or in_code_block or pending_notes):
             # Add content to current section
-            current_content.append(line)
+            if stripped or in_code_block:
+                current_content.append(line)
+                pending_notes = False
     
     # Save last prompt
     if current_prompt:
@@ -491,7 +551,7 @@ class PromptStore:
     def create_backup(self) -> Path:
         """Create a backup of the current prompts file."""
         if not self.path.exists():
-            raise FileNotFoundError(f"Data file not found: {self.path}")
+            self.save([])
         
         # Create backups directory
         backups_dir = self.path.parent / "backups"

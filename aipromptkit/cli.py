@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .store import DEFAULT_DATA_FILE, Prompt, PromptStore, normalize_tags, extract_variables, replace_variables
+from .store import DEFAULT_DATA_FILE, Prompt, PromptStore, find_missing_variables, normalize_tags, replace_variables
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,12 +188,12 @@ def main(argv: list[str] | None = None) -> int:
                         variables[key.strip()] = value.strip()
             
             # Replace variables
+            missing_vars = find_missing_variables(prompt.body, variables)
             result_text = replace_variables(prompt.body, variables)
             
             # Check for missing variables
-            remaining_vars = extract_variables(result_text)
-            if remaining_vars:
-                print(f"Warning: Missing variables: {', '.join([v[0] for v in remaining_vars])}")
+            if missing_vars:
+                print(f"Warning: Missing variables: {', '.join(missing_vars)}")
                 print("You can provide them with --vars option.")
                 print()
             
@@ -395,7 +395,7 @@ def export_markdown(prompts: list[Prompt], output: Path) -> None:
             ]
         )
         if prompt.notes:
-            lines.extend(["Notes:", "", prompt.notes, ""])
+            lines.extend(["Notes:", prompt.notes, ""])
 
     output.write_text("\n".join(lines), encoding="utf-8")
 

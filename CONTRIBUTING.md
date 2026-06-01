@@ -21,7 +21,7 @@ python -m aipromptkit --help
 Run tests:
 
 ```bash
-python -m unittest
+python -m unittest discover -s tests
 ```
 
 ## Pull Request Guidelines
