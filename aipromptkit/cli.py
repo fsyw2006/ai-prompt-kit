@@ -1,12 +1,54 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from .store import DEFAULT_DATA_FILE, Prompt, PromptStore, find_missing_variables, normalize_tags, replace_variables
+from .store import (
+    DEFAULT_DATA_FILE,
+    Prompt,
+    PromptStore,
+    analyze_prompt_quality,
+    find_missing_variables,
+    normalize_tags,
+    replace_variables,
+)
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def parse_variables(value: str) -> dict[str, str]:
+    if not value.strip():
+        return {}
+
+    try:
+        pairs = next(csv.reader([value], skipinitialspace=True))
+    except csv.Error as error:
+        raise ValueError(f"Could not parse --vars: {error}") from error
+
+    variables = {}
+    for pair in pairs:
+        if not pair.strip():
+            continue
+        if "=" not in pair:
+            raise ValueError("Variables must be key=value pairs separated by commas.")
+        key, parsed_value = pair.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError("Variable names cannot be empty.")
+        variables[key] = parsed_value.strip()
+    return variables
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser.add_argument("--body", required=True, help="Prompt body.")
     add_parser.add_argument("--tags", default="", help="Comma-separated tags.")
     add_parser.add_argument("--notes", default="", help="Optional notes.")
+    add_parser.add_argument(
+        "--auto-tags",
+        action="store_true",
+        help="Infer tags from the title, body, and notes.",
+    )
 
     list_parser = subparsers.add_parser("list", help="List saved prompts.")
     list_parser.add_argument(
@@ -36,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     show_parser = subparsers.add_parser("show", help="Show a prompt by id.")
-    show_parser.add_argument("id", type=int, help="Prompt id.")
+    show_parser.add_argument("id", type=positive_int, help="Prompt id.")
 
     search_parser = subparsers.add_parser("search", help="Search prompts.")
     search_parser.add_argument("query", nargs="?", default="", help="Keyword to search.")
@@ -48,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     copy_parser = subparsers.add_parser("copy", help="Copy prompt body by id.")
-    copy_parser.add_argument("id", type=int, help="Prompt id.")
+    copy_parser.add_argument("id", type=positive_int, help="Prompt id.")
 
     export_parser = subparsers.add_parser("export", help="Export prompts to file.")
     export_parser.add_argument("output", help="Output file path.")
@@ -60,11 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     use_parser = subparsers.add_parser("use", help="Use a prompt with variable substitution.")
-    use_parser.add_argument("id", type=int, help="Prompt id.")
+    use_parser.add_argument("id", type=positive_int, help="Prompt id.")
     use_parser.add_argument(
         "--vars",
         default="",
-        help="Variables as key=value pairs separated by commas (e.g., topic=Python,language=English).",
+        help='Variables as key=value pairs separated by commas. Quote values with commas, e.g. topic=AI,"tone=warm, clear".',
     )
     use_parser.add_argument(
         "--copy",
@@ -72,8 +119,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Copy the result to clipboard.",
     )
 
-    import_parser = subparsers.add_parser("import", help="Import prompts from Markdown file.")
-    import_parser.add_argument("input", help="Input Markdown file.")
+    import_parser = subparsers.add_parser("import", help="Import prompts from Markdown, JSON, or CSV.")
+    import_parser.add_argument("input", help="Input file path.")
+    import_parser.add_argument(
+        "--format",
+        choices=["auto", "markdown", "json", "csv"],
+        default="auto",
+        help="Input format (default: auto-detect from extension).",
+    )
     import_parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -83,17 +136,17 @@ def build_parser() -> argparse.ArgumentParser:
     tag_parser = subparsers.add_parser("tag", help="Manage prompt tags.")
     tag_subparsers = tag_parser.add_subparsers(dest="tag_command", required=True)
     add_tag_parser = tag_subparsers.add_parser("add", help="Add a tag to a prompt.")
-    add_tag_parser.add_argument("id", type=int, help="Prompt id.")
+    add_tag_parser.add_argument("id", type=positive_int, help="Prompt id.")
     add_tag_parser.add_argument("tag", help="Tag to add.")
     remove_tag_parser = tag_subparsers.add_parser("remove", help="Remove a tag from a prompt.")
-    remove_tag_parser.add_argument("id", type=int, help="Prompt id.")
+    remove_tag_parser.add_argument("id", type=positive_int, help="Prompt id.")
     remove_tag_parser.add_argument("tag", help="Tag to remove.")
-    list_tags_parser = tag_subparsers.add_parser("list", help="List all tags.")
+    tag_subparsers.add_parser("list", help="List all tags.")
 
     backup_parser = subparsers.add_parser("backup", help="Manage prompt backups.")
     backup_subparsers = backup_parser.add_subparsers(dest="backup_command", required=True)
-    backup_create_parser = backup_subparsers.add_parser("create", help="Create a new backup.")
-    backup_list_parser = backup_subparsers.add_parser("list", help="List all backups.")
+    backup_subparsers.add_parser("create", help="Create a new backup.")
+    backup_subparsers.add_parser("list", help="List all backups.")
     backup_restore_parser = backup_subparsers.add_parser("restore", help="Restore from a backup.")
     backup_restore_parser.add_argument("name", help="Backup filename to restore from.")
 
@@ -110,19 +163,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stats_parser.add_argument(
         "--limit",
-        type=int,
+        type=positive_int,
         default=10,
         help="Number of prompts to show (default: 10).",
     )
 
-    # Star commands
+    quality_parser = subparsers.add_parser("quality", help="Score prompt quality and show suggestions.")
+    quality_parser.add_argument("id", nargs="?", type=positive_int, help="Prompt id.")
+
     star_parser = subparsers.add_parser("star", help="Star/unstar a prompt.")
     star_subparsers = star_parser.add_subparsers(dest="star_command", required=True)
     star_add_parser = star_subparsers.add_parser("add", help="Star a prompt.")
-    star_add_parser.add_argument("id", type=int, help="Prompt id.")
+    star_add_parser.add_argument("id", type=positive_int, help="Prompt id.")
     star_remove_parser = star_subparsers.add_parser("remove", help="Unstar a prompt.")
-    star_remove_parser.add_argument("id", type=int, help="Prompt id.")
-    star_list_parser = star_subparsers.add_parser("list", help="List starred prompts.")
+    star_remove_parser.add_argument("id", type=positive_int, help="Prompt id.")
+    star_subparsers.add_parser("list", help="List starred prompts.")
 
     return parser
 
@@ -134,8 +189,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "add":
-            prompt = store.add(args.title, args.body, normalize_tags(args.tags), args.notes)
+            prompt = store.add(args.title, args.body, normalize_tags(args.tags), args.notes, args.auto_tags)
             print(f"Added prompt #{prompt.id}: {prompt.title}")
+            if args.auto_tags and prompt.tags:
+                print(f"Tags: {', '.join(prompt.tags)}")
             return 0
 
         if args.command == "list":
@@ -163,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "export":
-            output_path = Path(args.output)
+            output_path = Path(args.output).expanduser()
             if args.format == "json":
                 store.export_json(output_path)
             elif args.format == "csv":
@@ -175,29 +232,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "use":
             prompt = store.get(args.id)
-            
-            # Record usage
             store.record_usage(args.id)
-            
-            # Parse variables
-            variables = {}
-            if args.vars:
-                for pair in args.vars.split(","):
-                    if "=" in pair:
-                        key, value = pair.split("=", 1)
-                        variables[key.strip()] = value.strip()
-            
-            # Replace variables
+            variables = parse_variables(args.vars)
             missing_vars = find_missing_variables(prompt.body, variables)
             result_text = replace_variables(prompt.body, variables)
-            
-            # Check for missing variables
+
             if missing_vars:
                 print(f"Warning: Missing variables: {', '.join(missing_vars)}")
                 print("You can provide them with --vars option.")
                 print()
-            
-            # Copy to clipboard if requested
+
             if args.copy:
                 try:
                     copy_to_clipboard(result_text)
@@ -206,11 +250,11 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Error copying to clipboard: {error}", file=sys.stderr)
             else:
                 print_prompt_detail_with_text(prompt, result_text)
-            
+
             return 0
 
         if args.command == "import":
-            imported = store.import_from_markdown(Path(args.input).expanduser(), args.overwrite)
+            imported = store.import_prompts(Path(args.input).expanduser(), args.format, args.overwrite)
             if imported:
                 print(f"Imported {len(imported)} prompts:")
                 for prompt in imported:
@@ -221,31 +265,23 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "tag":
             if args.tag_command == "add":
-                try:
-                    store.add_tag(args.id, args.tag)
-                    prompt = store.get(args.id)
-                    print(f"Added tag '{args.tag}' to prompt #{prompt.id}: {prompt.title}")
-                    return 0
-                except LookupError as e:
-                    print(f"Error: {e}", file=sys.stderr)
-                    return 1
-            
+                store.add_tag(args.id, args.tag)
+                prompt = store.get(args.id)
+                print(f"Added tag '{args.tag}' to prompt #{prompt.id}: {prompt.title}")
+                return 0
+
             if args.tag_command == "remove":
-                try:
-                    store.remove_tag(args.id, args.tag)
-                    prompt = store.get(args.id)
-                    print(f"Removed tag '{args.tag}' from prompt #{prompt.id}: {prompt.title}")
-                    return 0
-                except LookupError as e:
-                    print(f"Error: {e}", file=sys.stderr)
-                    return 1
-            
+                store.remove_tag(args.id, args.tag)
+                prompt = store.get(args.id)
+                print(f"Removed tag '{args.tag}' from prompt #{prompt.id}: {prompt.title}")
+                return 0
+
             if args.tag_command == "list":
                 tags = store.get_all_tags()
                 if not tags:
                     print("No tags found.")
                     return 0
-                
+
                 print("Tags:")
                 for tag in tags:
                     prompts = store.get_prompts_by_tag(tag)
@@ -258,51 +294,69 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Backup created: {backup_path.name}")
                 print(f"Location: {backup_path.parent}")
                 return 0
-            
+
             if args.backup_command == "list":
                 backups = store.list_backups()
                 if not backups:
                     print("No backups found.")
                     return 0
-                
+
                 print(f"{'Name':<30} {'Size':<10} {'Created':<20}")
                 print("-" * 60)
                 for backup in backups:
                     size_kb = backup["size"] / 1024
                     print(f"{backup['name']:<30} {size_kb:<10.1f}KB {backup['created']:<20}")
                 return 0
-            
+
             if args.backup_command == "restore":
-                try:
-                    store.restore_backup(args.name)
-                    print(f"Successfully restored from backup: {args.name}")
-                    print("A new backup of the previous state was created automatically.")
-                    return 0
-                except FileNotFoundError as e:
-                    print(f"Error: {e}", file=sys.stderr)
-                    return 1
+                store.restore_backup(args.name)
+                print(f"Successfully restored from backup: {args.name}")
+                print("A new backup of the previous state was created automatically.")
+                return 0
+
+        if args.command == "stats":
+            if args.most_used:
+                print_prompt_usage_table(store.get_most_used(args.limit), f"Most used prompts (top {args.limit}):")
+                return 0
+
+            if args.recently_used:
+                print_prompt_usage_table(store.get_recently_used(args.limit), f"Recently used prompts (top {args.limit}):")
+                return 0
+
+            stats = store.get_stats()
+            print("Prompt Statistics:")
+            print(f"  Total prompts: {stats['total_prompts']}")
+            print(f"  Used prompts: {stats['used_prompts']}")
+            print(f"  Unused prompts: {stats['unused_prompts']}")
+            print(f"  Total usage: {stats['total_usage']}")
+            print(f"  Average usage per prompt: {stats['average_usage']:.1f}")
+
+            if stats["used_prompts"] > 0:
+                print("\nTop 5 most used prompts:")
+                print_prompt_usage_table(store.get_most_used(5), "")
+
+            return 0
+
+        if args.command == "quality":
+            if args.id:
+                print_quality_detail(store.get(args.id))
+            else:
+                print_quality_table(store.load())
+            return 0
 
         if args.command == "star":
             if args.star_command == "add":
-                try:
-                    store.star(args.id)
-                    prompt = store.get(args.id)
-                    print(f"Starred prompt #{prompt.id}: {prompt.title}")
-                    return 0
-                except LookupError as e:
-                    print(f"Error: {e}", file=sys.stderr)
-                    return 1
-            
+                store.star(args.id)
+                prompt = store.get(args.id)
+                print(f"Starred prompt #{prompt.id}: {prompt.title}")
+                return 0
+
             if args.star_command == "remove":
-                try:
-                    store.unstar(args.id)
-                    prompt = store.get(args.id)
-                    print(f"Unstarred prompt #{prompt.id}: {prompt.title}")
-                    return 0
-                except LookupError as e:
-                    print(f"Error: {e}", file=sys.stderr)
-                    return 1
-            
+                store.unstar(args.id)
+                prompt = store.get(args.id)
+                print(f"Unstarred prompt #{prompt.id}: {prompt.title}")
+                return 0
+
             if args.star_command == "list":
                 starred = store.get_starred()
                 if not starred:
@@ -311,30 +365,6 @@ def main(argv: list[str] | None = None) -> int:
                 print("Starred prompts:")
                 print_prompt_table(starred)
                 return 0
-
-        if args.command == "stats":
-            if args.most_used:
-                print_prompt_usage_table(store.get_most_used(args.limit), f"Most used prompts (top {args.limit}):")
-                return 0
-            
-            if args.recently_used:
-                print_prompt_usage_table(store.get_recently_used(args.limit), f"Recently used prompts (top {args.limit}):")
-                return 0
-            
-            # Default: show overall stats
-            stats = store.get_stats()
-            print("Prompt Statistics:")
-            print(f"  Total prompts: {stats['total_prompts']}")
-            print(f"  Used prompts: {stats['used_prompts']}")
-            print(f"  Unused prompts: {stats['unused_prompts']}")
-            print(f"  Total usage: {stats['total_usage']}")
-            print(f"  Average usage per prompt: {stats['average_usage']:.1f}")
-            
-            if stats['used_prompts'] > 0:
-                print("\nTop 5 most used prompts:")
-                print_prompt_usage_table(store.get_most_used(5), "")
-            
-            return 0
 
     except (ValueError, LookupError, OSError) as error:
         print(f"Error: {error}", file=sys.stderr)
@@ -397,6 +427,7 @@ def export_markdown(prompts: list[Prompt], output: Path) -> None:
         if prompt.notes:
             lines.extend(["Notes:", prompt.notes, ""])
 
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -432,6 +463,38 @@ def print_prompt_usage_table(prompts: list[Prompt], header: str) -> None:
         prompt_title = truncate(prompt.title, 30)
         last_used = prompt.last_used_at[:19] if prompt.last_used_at else "Never"
         print(f"{prompt.id:<4} {prompt_title:<32} {prompt.usage_count:<8} {last_used:<20}")
+
+
+def print_quality_table(prompts: list[Prompt]) -> None:
+    if not prompts:
+        print("No prompts found.")
+        return
+
+    print(f"{'ID':<4} {'Score':<7} {'Title':<30} Top suggestion")
+    print("-" * 86)
+    for prompt in prompts:
+        report = analyze_prompt_quality(prompt.title, prompt.body, prompt.tags, prompt.notes)
+        suggestions = report["suggestions"]
+        suggestion = suggestions[0] if suggestions else "-"
+        print(f"{prompt.id:<4} {report['score']:<7} {truncate(prompt.title, 28):<30} {truncate(suggestion, 38)}")
+
+
+def print_quality_detail(prompt: Prompt) -> None:
+    report = analyze_prompt_quality(prompt.title, prompt.body, prompt.tags, prompt.notes)
+    print(f"#{prompt.id} {prompt.title}")
+    print(f"Quality score: {report['score']}/100")
+
+    issues = report["issues"]
+    if issues:
+        print("\nIssues:")
+        for issue in issues:
+            print(f"  - {issue}")
+
+    suggestions = report["suggestions"]
+    if suggestions:
+        print("\nSuggestions:")
+        for suggestion in suggestions:
+            print(f"  - {suggestion}")
 
 
 if __name__ == "__main__":

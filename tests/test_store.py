@@ -1,11 +1,15 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from aipromptkit.store import (
+    DataFileError,
     PromptStore,
+    analyze_prompt_quality,
     extract_variables,
     find_missing_variables,
+    infer_tags,
     normalize_tags,
     parse_markdown_prompts,
     replace_variables,
@@ -15,6 +19,7 @@ from aipromptkit.store import (
 class PromptStoreTests(unittest.TestCase):
     def test_normalize_tags(self):
         self.assertEqual(normalize_tags("AI, coding, ai, "), ["ai", "coding"])
+        self.assertEqual(normalize_tags("AI， coding|Review"), ["ai", "coding", "review"])
 
     def test_add_and_get_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -35,6 +40,27 @@ class PromptStoreTests(unittest.TestCase):
             store.add("Writer", "Write a product brief.", ["writing"], "")
 
             results = store.search("python", "coding")
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].title, "Reviewer")
+
+    def test_search_handles_unicode_and_full_width_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PromptStore(Path(directory) / "prompts.json")
+            store.add("中文 Reviewer", "Review Ｐｙｔｈｏｎ code for bugs.", ["Coding"], "")
+
+            results = store.search("python bugs", "CODING")
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].title, "中文 Reviewer")
+
+    def test_fuzzy_search_tolerates_typos(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PromptStore(Path(directory) / "prompts.json")
+            store.add("Reviewer", "Review Python coding patterns.", ["coding"], "")
+            store.add("Writer", "Write a product brief.", ["writing"], "")
+
+            results = store.fuzzy_search("codng")
 
             self.assertEqual(len(results), 1)
             self.assertEqual(results[0].title, "Reviewer")
@@ -97,6 +123,24 @@ Another body."""
         self.assertEqual(prompts[1]["body"], "Another body.")
         self.assertNotIn("notes", prompts[1])
 
+    def test_parse_markdown_prompts_with_chinese_sections(self):
+        markdown_content = """# 中文 Prompt
+标签: 写作, 总结
+
+## 正文
+请总结这段内容。
+
+## 笔记
+适合中文材料。"""
+
+        prompts = parse_markdown_prompts(markdown_content)
+
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0]["title"], "中文 Prompt")
+        self.assertEqual(prompts[0]["tags"], ["写作", "总结"])
+        self.assertEqual(prompts[0]["body"], "请总结这段内容。")
+        self.assertEqual(prompts[0]["notes"], "适合中文材料。")
+
     def test_parse_exported_markdown_prompt(self):
         markdown_content = """# Prompt Library
 
@@ -140,6 +184,14 @@ Useful for PRs
             prompts_after = store.load()
             self.assertEqual(len(prompts_after), 1)
             self.assertEqual(prompts_after[0].title, "Prompt 1")
+
+    def test_restore_backup_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PromptStore(Path(directory) / "prompts.json")
+            store.add("Prompt 1", "Body 1", ["tag1"], "Note 1")
+
+            with self.assertRaisesRegex(ValueError, "backups directory"):
+                store.restore_backup("../outside.json")
 
     def test_create_backup_without_existing_data_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -239,6 +291,122 @@ Useful for PRs
             prompts = store.get_prompts_by_tag("tag1")
             self.assertEqual(len(prompts), 1)
             self.assertEqual(prompts[0].id, prompt.id)
+
+    def test_empty_tag_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PromptStore(Path(directory) / "prompts.json")
+            prompt = store.add("Test Prompt", "Body", ["tag1"], "Note")
+
+            with self.assertRaisesRegex(ValueError, "Tag is required"):
+                store.add_tag(prompt.id, " ")
+
+    def test_invalid_data_file_json_has_friendly_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = Path(directory) / "prompts.json"
+            data_path.write_text("{broken json", encoding="utf-8")
+            store = PromptStore(data_path)
+
+            with self.assertRaisesRegex(DataFileError, "not valid JSON"):
+                store.load()
+
+    def test_invalid_data_file_schema_has_friendly_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_path = Path(directory) / "prompts.json"
+            data_path.write_text(json.dumps({"prompts": {"bad": "shape"}}), encoding="utf-8")
+            store = PromptStore(data_path)
+
+            with self.assertRaisesRegex(DataFileError, "must be a list"):
+                store.load()
+
+    def test_add_with_auto_tags(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PromptStore(Path(directory) / "prompts.json")
+
+            prompt = store.add("Code reviewer", "Review Python code for bugs and missing tests.", [], "", auto_tags=True)
+
+            self.assertIn("coding", prompt.tags)
+
+    def test_infer_tags_uses_keyword_rules(self):
+        tags = infer_tags("Translate email", "Translate this English email into Chinese.")
+
+        self.assertIn("translation", tags)
+        self.assertIn("writing", tags)
+
+    def test_analyze_prompt_quality(self):
+        weak = analyze_prompt_quality("Weak", "Help.", [])
+        strong = analyze_prompt_quality(
+            "Code reviewer",
+            (
+                "Review the following Python code. Use Markdown bullets and include context, "
+                "bugs, edge cases, missing tests, and concrete fixes for the developer audience."
+            ),
+            ["coding"],
+        )
+
+        self.assertLess(weak["score"], strong["score"])
+        self.assertTrue(weak["issues"])
+
+    def test_import_json_prompts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "prompts.json"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "prompts": [
+                            {
+                                "title": "中文 Prompt",
+                                "body": "请总结这段内容，并输出 Markdown 表格。",
+                                "tags": ["写作"],
+                                "starred": True,
+                                "usage_count": 2,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = PromptStore(Path(directory) / "data.json")
+
+            imported = store.import_prompts(input_path, "json")
+
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0].title, "中文 Prompt")
+            self.assertEqual(imported[0].tags, ["写作"])
+            self.assertTrue(imported[0].starred)
+            self.assertEqual(imported[0].usage_count, 2)
+
+    def test_export_and_import_csv_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            export_path = Path(directory) / "exports" / "prompts.csv"
+            source = PromptStore(Path(directory) / "source.json")
+            source.add("CSV Prompt", "Review this, then write a summary.", ["coding", "writing"], "Has comma")
+            source.export_csv(export_path)
+
+            target = PromptStore(Path(directory) / "target.json")
+            imported = target.import_prompts(export_path, "csv")
+
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0].body, "Review this, then write a summary.")
+            self.assertEqual(imported[0].tags, ["coding", "writing"])
+
+    def test_import_overwrite_matches_titles_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "prompts.json"
+            input_path.write_text(
+                json.dumps({"prompts": [{"title": "reviewer", "body": "New body", "tags": ["new"]}]}),
+                encoding="utf-8",
+            )
+            store = PromptStore(Path(directory) / "data.json")
+            store.add("Reviewer", "Old body", ["old"], "")
+
+            imported = store.import_prompts(input_path, "json", overwrite=True)
+            prompts = store.load()
+
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(len(prompts), 1)
+            self.assertEqual(prompts[0].body, "New body")
+            self.assertEqual(prompts[0].tags, ["new"])
 
 
 if __name__ == "__main__":
